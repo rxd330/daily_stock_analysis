@@ -348,6 +348,13 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        '--digest-date',
+        type=str,
+        default=None,
+        help='持仓汇总的目标日期 YYYY-MM-DD（默认: 今天）'
+    )
+
+    parser.add_argument(
         '--force-run',
         action='store_true',
         help='跳过交易日检查，强制执行全量分析（Issue #373）'
@@ -1440,12 +1447,13 @@ def main() -> int:
             )
             return 0
 
-        # 模式1.5: 生成持仓汇总（读取今日所有个股报告，LLM 生成组合总结）
+        # 模式1.5: 生成持仓汇总（读取指定日期个股报告，LLM 生成组合总结）
         if args.portfolio_digest:
-            logger.info("模式: 生成持仓汇总 (Portfolio Digest)")
+            digest_date = getattr(args, 'digest_date', None) or None
+            logger.info("模式: 生成持仓汇总 (Portfolio Digest) date=%s", digest_date or "today")
             from src.services.portfolio_digest import generate_portfolio_digest
 
-            result = generate_portfolio_digest()
+            result = generate_portfolio_digest(target_date=digest_date)
             if result["status"] == "ok":
                 digest = result["digest_text"]
                 logger.info("=" * 60)

@@ -1360,18 +1360,20 @@ def _build_analysis_report(
 
 
 # ============================================================
-# Portfolio Digest endpoint
+# Portfolio Digest endpoints
 # ============================================================
+
 
 @router.post("/portfolio-digest")
 async def portfolio_digest(
-    codes: Optional[str] = Query(None, description="Comma-separated stock codes (optional, defaults to all)"),
+    codes: Optional[str] = Query(None, description="Comma-separated stock codes (optional)"),
     lang: str = Query("zh", description="Language: zh or en"),
+    date: Optional[str] = Query(None, description="Target date YYYY-MM-DD (default: today)"),
 ):
-    """Generate a portfolio-level digest from today's individual stock analyses.
+    """Generate a portfolio-level digest from stock analyses for a given date.
 
-    Reads all analysis_history records from today, feeds them to the LLM,
-    and returns a consolidated portfolio summary.
+    Reads analysis_history records for the target date, feeds them to the LLM,
+    and returns a consolidated portfolio summary with stock freshness info.
     """
     from src.services.portfolio_digest import generate_portfolio_digest
 
@@ -1379,5 +1381,19 @@ async def portfolio_digest(
     if codes:
         code_list = [c.strip().upper() for c in codes.split(",") if c.strip()]
 
-    result = generate_portfolio_digest(codes=code_list, lang=lang)
+    result = generate_portfolio_digest(codes=code_list, lang=lang, target_date=date)
     return JSONResponse(content=result)
+
+
+@router.get("/available-digest-dates")
+async def available_digest_dates(
+    days: int = Query(30, description="Lookback window in days"),
+):
+    """Return all dates that have saved analysis reports.
+
+    Used by the frontend date picker to highlight selectable dates.
+    """
+    from src.services.portfolio_digest import get_available_dates
+
+    dates = get_available_dates(days_back=days)
+    return JSONResponse(content={"dates": dates, "count": len(dates)})
