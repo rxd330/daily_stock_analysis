@@ -301,6 +301,15 @@ def trigger_analysis(
     if not stock_codes:
         raise api_error(400, "validation_error", "股票代码不能为空或仅包含空白字符")
 
+    # Auto-add analyzed stocks to watchlist
+    try:
+        from src.storage import get_db
+        db = get_db()
+        for code in stock_codes:
+            db.add_to_watchlist(code)
+    except Exception:
+        pass  # non-critical — analysis proceeds regardless
+
     # Sync mode only supports single-stock analysis.
     if not request.async_mode:
         if len(stock_codes) > 1:
