@@ -15,165 +15,128 @@ type TaskState = {
 };
 
 const EodSummaryPage: React.FC = () => {
-  // Dates
   const [availableDates, setAvailableDates] = useState<string[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
-
-  // Stock list
   const [stockCodes, setStockCodes] = useState<string[]>([]);
   const [loadingStocks, setLoadingStocks] = useState(true);
+  const [hasReportsToday, setHasReportsToday] = useState<boolean | null>(null);
 
-  // Workflow state
   const [phase, setPhase] = useState<'idle' | 'analyzing' | 'digesting' | 'done'>('idle');
   const [tasks, setTasks] = useState<TaskState[]>([]);
   const [digest, setDigest] = useState<PortfolioDigestResponse | null>(null);
   const [error, setError] = useState<ParsedApiError | null>(null);
   const pollTimer = useRef<number | null>(null);
 
-  // ---- Load stock list from watchlist ----
+  // ---- Load stock list ----
   const loadStockList = useCallback(async () => {
     setLoadingStocks(true);
     try {
       const result = await watchlistApi.list();
-      const codes = result.items.map((i) => i.code);
-      setStockCodes(codes);
+      setStockCodes(result.items.map((i) => i.code));
     } catch {
-      // Fall back to system config
       try {
         const config = await systemConfigApi.getConfig(false);
-        const stockItem = config.items?.find((i) => i.key === 'STOCK_LIST');
-        if (stockItem?.value) {
-          const codes = stockItem.value.split(',').map((c) => c.trim()).filter(Boolean);
-          setStockCodes(codes);
-        }
+        const item = config.items?.find((i) => i.key === 'STOCK_LIST');
+        if (item?.value) setStockCodes(item.value.split(',').map((c) => c.trim()).filter(Boolean));
       } catch { /* silent */ }
     } finally {
       setLoadingStocks(false);
     }
   }, []);
 
-  // ---- Load available dates ----
-  const loadAvailableDates = useCallback(async () => {
+  // ---- Load available dates & check today ----
+  const loadDates = useCallback(async () => {
     try {
       const result = await portfolioDigestApi.getAvailableDates();
       setAvailableDates(result.dates);
+      const today = new Date().toISOString().slice(0, 10);
+      setHasReportsToday(result.dates.includes(today));
     } catch { /* silent */ }
   }, []);
 
   useEffect(() => {
     void loadStockList();
-    void loadAvailableDates();
-  }, [loadStockList, loadAvailableDates]);
+    void loadDates();
+  }, [loadStockList, loadDates]);
 
-  // ---- Cleanup poll on unmount ----
   useEffect(() => {
-    return () => {
-      if (pollTimer.current !== null) window.clearInterval(pollTimer.current);
-    };
+    return () => { if (pollTimer.current !== null) window.clearInterval(pollTimer.current); };
   }, []);
 
-  // ---- Poll task statuses ----
+  // ---- Poll tasks ----
   const pollTasks = useCallback(async (taskList: TaskState[]) => {
-    const updated = await Promise.all(
-      taskList.map(async (t) => {
-        if (t.status === 'completed' || t.status === 'failed') return t;
-        try {
-          const status: TaskStatus = await analysisApi.getStatus(t.taskId);
-          return {
-            ...t,
-            status: status.status === 'completed' ? 'completed' as const
-                  : status.status === 'failed' || status.status === 'cancelled' ? 'failed' as const
-                  : 'processing' as const,
-            error: status.error,
-          };
-        } catch {
-          return { ...t, status: 'failed' as const, error: 'Status check failed' };
-        }
-      })
-    );
+    const updated = await Promise.all(taskList.map(async (t) => {
+      if (t.status === 'completed' || t.status === 'failed') return t;
+      try {
+        const status: TaskStatus = await analysisApi.getStatus(t.taskId);
+        return {
+          ...t,
+          status: status.status === 'completed' ? 'completed' as const
+                : status.status === 'failed' || status.status === 'cancelled' ? 'failed' as const
+                : 'processing' as const,
+          error: status.error,
+        };
+      } catch {
+        return { ...t, status: 'failed' as const, error: 'Status check failed' };
+      }
+    }));
     return updated;
   }, []);
 
-  // ---- Run full workflow ----
+  // ---- Generate digest only (fast — reads existing reports) ----
+  const generateDigestOnly = useCallback(async (date?: string) => {
+    setPhase('digesting');
+    setError(null);
+    setDigest(null);
+    try {
+      const result = await portfolioDigestApi.generate({ date: date || selectedDate, lang: 'zh' });
+      setDigest(result);
+      setPhase('done');
+      void loadDates();
+    } catch (err) {
+      setError(getParsedApiError(err));
+      setPhase('idle');
+    }
+  }, [selectedDate, loadDates]);
+
+  // ---- Run full analysis then digest (secondary workflow) ----
   const runFullWorkflow = useCallback(async () => {
     if (stockCodes.length === 0) return;
-
     setPhase('analyzing');
     setError(null);
     setDigest(null);
-
     try {
-      // Submit batch analysis
-      const response = await analysisApi.analyzeAsync({
-        stockCodes,
-        reportType: 'full',
-        asyncMode: true,
-        reportLanguage: 'zh',
-      });
-
-      // Extract task IDs
+      const response = await analysisApi.analyzeAsync({ stockCodes, reportType: 'full', asyncMode: true, reportLanguage: 'zh' });
       let taskList: TaskState[] = [];
       if ('accepted' in response && Array.isArray(response.accepted)) {
-        taskList = response.accepted.map((item) => ({
-          stockCode: item.stockCode,
-          taskId: item.taskId,
-          status: 'processing' as const,
-        }));
+        taskList = response.accepted.map((item) => ({ stockCode: item.stockCode, taskId: item.taskId, status: 'processing' as const }));
       } else if ('taskId' in response) {
-        taskList = [{
-          stockCode: stockCodes[0],
-          taskId: (response as { taskId: string }).taskId,
-          status: 'processing' as const,
-        }];
+        taskList = [{ stockCode: stockCodes[0], taskId: (response as { taskId: string }).taskId, status: 'processing' as const }];
       }
-
       setTasks(taskList);
-
-      // Poll until all done
       await new Promise<void>((resolve) => {
         const interval = window.setInterval(async () => {
           const updated = await pollTasks(taskList);
           setTasks(updated);
           taskList = updated;
-
-          const allDone = updated.every((t) => t.status === 'completed' || t.status === 'failed');
-          if (allDone) {
+          if (updated.every((t) => t.status === 'completed' || t.status === 'failed')) {
             window.clearInterval(interval);
             resolve();
           }
         }, 3000);
-
         pollTimer.current = interval;
       });
-
-      // All done — generate digest
       setPhase('digesting');
       const result = await portfolioDigestApi.generate({ date: selectedDate, lang: 'zh' });
       setDigest(result);
       setPhase('done');
-      void loadAvailableDates(); // Refresh date list
-
+      void loadDates();
     } catch (err) {
       setError(getParsedApiError(err));
       setPhase('idle');
     }
-  }, [stockCodes, selectedDate, pollTasks, loadAvailableDates]);
+  }, [stockCodes, selectedDate, pollTasks, loadDates]);
 
-  // ---- Generate digest only (for past dates) ----
-  const generateDigestOnly = useCallback(async (date?: string) => {
-    setPhase('digesting');
-    setError(null);
-    try {
-      const result = await portfolioDigestApi.generate({ date: date || selectedDate, lang: 'zh' });
-      setDigest(result);
-      setPhase('done');
-    } catch (err) {
-      setError(getParsedApiError(err));
-      setPhase('idle');
-    }
-  }, [selectedDate]);
-
-  // ---- Format date ----
   const formatDate = (dateStr: string) => {
     try {
       const d = new Date(dateStr + 'T00:00:00');
@@ -181,7 +144,6 @@ const EodSummaryPage: React.FC = () => {
     } catch { return dateStr; }
   };
 
-  // ---- Freshness badges ----
   const FreshnessBadges: React.FC<{ freshness: StockFreshness[] }> = ({ freshness }) => {
     if (!freshness?.length) return null;
     return (
@@ -205,14 +167,14 @@ const EodSummaryPage: React.FC = () => {
       <h1 className="text-xl font-semibold text-foreground mb-4">EOD 总结</h1>
       <div className="flex flex-col gap-4">
 
-        {/* Stock list info */}
+        {/* Watchlist info */}
         {!loadingStocks && stockCodes.length > 0 && (
           <div className="text-sm text-secondary-text">
-            持仓: {stockCodes.join(', ')} ({stockCodes.length} 只)
+            持仓: {stockCodes.length} 只 ({stockCodes.slice(0, 6).join(', ')}{stockCodes.length > 6 ? '...' : ''})
           </div>
         )}
         {!loadingStocks && stockCodes.length === 0 && (
-          <InlineAlert variant="warning" title="未配置自选股" message="请先在系统设置中配置 STOCK_LIST。" />
+          <InlineAlert variant="warning" title="未配置持仓" message="请先在系统设置或首页添加自选股。" />
         )}
 
         {/* Controls */}
@@ -221,7 +183,7 @@ const EodSummaryPage: React.FC = () => {
             <label className="text-xs text-secondary-text font-medium">日期</label>
             <select
               value={selectedDate}
-              onChange={(e) => { setSelectedDate(e.target.value); setDigest(null); setPhase('idle'); }}
+              onChange={(e) => { setSelectedDate(e.target.value); setDigest(null); setPhase('idle'); setTasks([]); }}
               className="input min-w-[180px]"
             >
               {!availableDates.includes(selectedDate) && (
@@ -233,32 +195,29 @@ const EodSummaryPage: React.FC = () => {
             </select>
           </div>
 
-          {/* Primary action */}
-          {isToday && phase === 'idle' && (
-            <Button onClick={runFullWorkflow} disabled={stockCodes.length === 0} className="flex items-center gap-2">
-              <Play className="h-4 w-4" />
-              运行全部分析 + 生成总结
-            </Button>
-          )}
-
-          {/* Generate-only for past dates */}
-          {!isToday && phase === 'idle' && (
+          {/* Primary: Generate summary from existing reports */}
+          {phase === 'idle' && (
             <Button onClick={() => generateDigestOnly()} className="flex items-center gap-2">
               <RefreshCw className="h-4 w-4" />
               生成总结
             </Button>
           )}
 
-          {/* Analyzing state */}
+          {/* Secondary: Run analysis first (only for today, only if no reports yet) */}
+          {phase === 'idle' && isToday && hasReportsToday === false && stockCodes.length > 0 && (
+            <Button onClick={runFullWorkflow} variant="outline" className="flex items-center gap-2">
+              <Play className="h-4 w-4" />
+              先运行分析
+            </Button>
+          )}
+
+          {/* States */}
           {phase === 'analyzing' && (
             <div className="flex items-center gap-2">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-              <span className="text-sm text-secondary-text">
-                分析中 ({completedCount}/{totalCount})
-              </span>
+              <span className="text-sm text-secondary-text">分析中 ({completedCount}/{totalCount})</span>
             </div>
           )}
-
           {phase === 'digesting' && (
             <div className="flex items-center gap-2">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
@@ -266,6 +225,15 @@ const EodSummaryPage: React.FC = () => {
             </div>
           )}
         </div>
+
+        {/* No reports today hint */}
+        {phase === 'idle' && isToday && hasReportsToday === false && (
+          <InlineAlert
+            variant="info"
+            title="今日尚无分析报告"
+            message="点击「先运行分析」对全部持仓运行个股分析，完成后会自动生成总结。如果你已在首页运行过分析，直接点「生成总结」即可。"
+          />
+        )}
 
         {/* Task progress */}
         {tasks.length > 0 && (
@@ -284,26 +252,20 @@ const EodSummaryPage: React.FC = () => {
           </div>
         )}
 
-        {/* After workflow: show digest */}
+        {/* Digest result */}
         {phase === 'done' && (
           <>
-            {hasFailed && (
-              <InlineAlert variant="warning" title="部分分析失败" message="部分股票分析失败，总结仅基于成功完成的股票。" />
-            )}
-
+            {hasFailed && <InlineAlert variant="warning" title="部分分析失败" message="总结仅基于成功完成的股票。" />}
             {digest && !digest.isToday && (
               <InlineAlert variant="warning" title="非今日数据" message={`当前显示 ${digest.targetDate} 的总结。`} />
             )}
             {digest?.anyStale && (
               <InlineAlert variant="warning" title="部分数据过时" message="部分股票分析不是最新的，已在总结中标注。" />
             )}
-
             {error && <ApiErrorAlert error={error} />}
-
             {digest?.status === 'no_data' && (
               <EmptyState icon={<Calendar className="h-12 w-12 text-muted-text" />} title="该日期无分析报告" description={digest.error || ''} />
             )}
-
             {digest?.status === 'ok' && digest.digestText && (
               <div className="flex flex-col gap-3">
                 <div className="flex flex-wrap items-center gap-2 text-xs text-secondary-text">
@@ -319,36 +281,26 @@ const EodSummaryPage: React.FC = () => {
                 </div>
               </div>
             )}
-
             {digest?.status === 'error' && (
               <InlineAlert variant="danger" title="生成失败" message={digest.error || '请重试。'} />
             )}
-
-            {/* Re-run button */}
             <div className="flex gap-3">
-              {isToday && (
-                <Button onClick={runFullWorkflow} variant="outline" className="flex items-center gap-2">
-                  <RefreshCw className="h-4 w-4" /> 重新运行
-                </Button>
-              )}
-              {!isToday && (
-                <Button onClick={() => generateDigestOnly()} variant="outline" className="flex items-center gap-2">
-                  <RefreshCw className="h-4 w-4" /> 重新生成
-                </Button>
-              )}
+              <Button onClick={() => generateDigestOnly()} variant="outline" className="flex items-center gap-2">
+                <RefreshCw className="h-4 w-4" /> 重新生成
+              </Button>
             </div>
           </>
         )}
 
-        {/* Idle state (no digest yet) */}
+        {/* Idle */}
         {phase === 'idle' && (
           <EmptyState
             icon={<FileText className="h-12 w-12 text-muted-text" />}
-            title={isToday ? '一键运行 EOD 分析' : '查看历史总结'}
+            title={isToday ? '生成今日持仓总结' : '查看历史总结'}
             description={
               isToday
-                ? '点击上方按钮，系统将自动运行所有持仓的个股分析，完成后生成投资组合级别总结。'
-                : '选择过去日期后点击「生成总结」，系统将读取该日期的分析报告生成概述。'
+                ? '点击「生成总结」，系统将读取今日已有的个股分析报告，用 LLM 生成投资组合级别概述。'
+                : '选择日期后点击「生成总结」。'
             }
           />
         )}
