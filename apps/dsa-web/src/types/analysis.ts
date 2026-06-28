@@ -521,3 +521,27 @@ export const getSentimentColor = (score: number): string => {
   if (score <= 80) return '#22c55e'; // green-500
   return '#10b981'; // emerald-500
 };
+
+// ============ Portfolio Digest Types ============
+
+export interface StockFreshness {
+  code: string;
+  name: string;
+  reportDate: string;
+  ageDays: number;
+  fresh: boolean;
+}
+
+export interface PortfolioDigestResponse {
+  status: 'ok' | 'no_data' | 'error';
+  digestText?: string | null;
+  targetDate: string;
+  isToday: boolean;
+  stockCount: number;
+  stocksIncluded?: string[];
+  stocksFreshness?: StockFreshness[];
+  anyStale?: boolean;
+  modelUsed?: string;
+  error?: string;
+}
+

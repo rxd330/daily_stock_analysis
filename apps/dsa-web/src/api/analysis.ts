@@ -200,3 +200,33 @@ export class DuplicateTaskError extends Error {
     this.existingTaskId = existingTaskId;
   }
 }
+
+// ============ Portfolio Digest ============
+
+import type { PortfolioDigestResponse } from '../types/analysis';
+
+export const portfolioDigestApi = {
+  /** Generate portfolio-level EOD summary */
+  generate: async (params: {
+    date?: string;
+    codes?: string;
+    lang?: string;
+  }): Promise<PortfolioDigestResponse> => {
+    const searchParams = new URLSearchParams();
+    if (params.date) searchParams.set('date', params.date);
+    if (params.codes) searchParams.set('codes', params.codes);
+    if (params.lang) searchParams.set('lang', params.lang);
+    const qs = searchParams.toString();
+    const url = `/api/v1/analysis/portfolio-digest${qs ? '?' + qs : ''}`;
+    const response = await apiClient.post<PortfolioDigestResponse>(url);
+    return response.data;
+  },
+
+  /** Get dates with available reports */
+  getAvailableDates: async (days = 30): Promise<{ dates: string[]; count: number }> => {
+    const response = await apiClient.get<{ dates: string[]; count: number }>(
+      `/api/v1/analysis/available-digest-dates?days=${days}`
+    );
+    return response.data;
+  },
+};
