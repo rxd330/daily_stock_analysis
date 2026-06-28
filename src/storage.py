@@ -1100,6 +1100,19 @@ class DecisionSignalFeedbackRecord(Base):
     updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
 
 
+class WatchlistItem(Base):
+    """User watchlist — stocks to analyze daily."""
+
+    __tablename__ = 'watchlist'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(20), nullable=False, unique=True, index=True)
+    name = Column(String(100))
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    added_at = Column(DateTime, default=utc_naive_now)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now)
+
+
 class _DatabaseManagerMeta(type):
     """Serialize DatabaseManager construction across __new__ and __init__."""
 
@@ -3218,6 +3231,85 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             }
             for r in rows
         ]
+
+    # ── Watchlist CRUD ──────────────────────────────────────────
+
+    def get_watchlist(self, active_only: bool = True) -> List[Dict[str, Any]]:
+        """Return all watchlist items, optionally filtering to active only.
+
+        Returns list of {code, name, active, added_at}.
+        """
+        with self.get_session() as session:
+            q = select(WatchlistItem).order_by(WatchlistItem.added_at)
+            if active_only:
+                q = q.where(WatchlistItem.active == True)
+            rows = session.execute(q).scalars().all()
+            return [
+                {
+                    "code": r.code,
+                    "name": r.name,
+                    "active": r.active,
+                    "added_at": r.added_at.isoformat() if r.added_at else None,
+                }
+                for r in rows
+            ]
+
+    def get_watchlist_codes(self, active_only: bool = True) -> List[str]:
+        """Return list of active watchlist stock codes."""
+        items = self.get_watchlist(active_only=active_only)
+        return [item["code"] for item in items]
+
+    def add_to_watchlist(self, code: str, name: Optional[str] = None) -> bool:
+        """Add or update a stock in the watchlist. Returns True if inserted/updated."""
+        code = (code or "").strip().upper()
+        if not code:
+            return False
+        with self.get_session() as session:
+            existing = session.execute(
+                select(WatchlistItem).where(WatchlistItem.code == code)
+            ).scalar_one_or_none()
+            if existing:
+                existing.active = True
+                if name:
+                    existing.name = name
+                existing.updated_at = utc_naive_now()
+            else:
+                session.add(WatchlistItem(code=code, name=name, active=True))
+            session.commit()
+        return True
+
+    def remove_from_watchlist(self, code: str) -> bool:
+        """Soft-delete: mark a watchlist item as inactive. Returns True if found."""
+        code = (code or "").strip().upper()
+        if not code:
+            return False
+        with self.get_session() as session:
+            item = session.execute(
+                select(WatchlistItem).where(WatchlistItem.code == code)
+            ).scalar_one_or_none()
+            if item:
+                item.active = False
+                item.updated_at = utc_naive_now()
+                session.commit()
+                return True
+        return False
+
+    def import_watchlist_from_env(self, stock_list_str: str) -> int:
+        """Batch import codes from a comma-separated string. Returns count added."""
+        codes = [c.strip().upper() for c in (stock_list_str or "").split(",") if c.strip()]
+        added = 0
+        for code in codes:
+            if self.add_to_watchlist(code):
+                added += 1
+        return added
+
+    def watchlist_has_items(self) -> bool:
+        """Return True if watchlist has any active items."""
+        with self.get_session() as session:
+            count = session.execute(
+                select(func.count(WatchlistItem.id)).where(WatchlistItem.active == True)
+            ).scalar()
+            return bool(count)
 
 
 # 便捷函数

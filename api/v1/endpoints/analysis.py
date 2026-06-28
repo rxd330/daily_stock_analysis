@@ -1397,3 +1397,35 @@ async def available_digest_dates(
 
     dates = get_available_dates(days_back=days)
     return JSONResponse(content={"dates": dates, "count": len(dates)})
+
+
+# ============================================================
+# Watchlist endpoints
+# ============================================================
+
+
+@router.get("/watchlist")
+async def get_watchlist():
+    """Return all active watchlist items from the database."""
+    from src.storage import get_db
+    db = get_db()
+    items = db.get_watchlist(active_only=True)
+    return JSONResponse(content={"items": items, "count": len(items)})
+
+
+@router.post("/watchlist/add")
+async def add_to_watchlist(code: str = Query(..., description="Stock code to add")):
+    """Add a stock to the watchlist (or re-activate if previously removed)."""
+    from src.storage import get_db
+    db = get_db()
+    ok = db.add_to_watchlist(code)
+    return JSONResponse(content={"status": "ok" if ok else "error", "code": code.upper()})
+
+
+@router.post("/watchlist/remove")
+async def remove_from_watchlist(code: str = Query(..., description="Stock code to remove")):
+    """Remove a stock from the watchlist (soft-delete)."""
+    from src.storage import get_db
+    db = get_db()
+    ok = db.remove_from_watchlist(code)
+    return JSONResponse(content={"status": "ok" if ok else "not_found", "code": code.upper()})

@@ -230,3 +230,38 @@ export const portfolioDigestApi = {
     return response.data;
   },
 };
+
+// ============ Watchlist ============
+
+export interface WatchlistItem {
+  code: string;
+  name: string | null;
+  active: boolean;
+  addedAt: string | null;
+}
+
+export const watchlistApi = {
+  /** Get all active watchlist items */
+  list: async (): Promise<{ items: WatchlistItem[]; count: number }> => {
+    const response = await apiClient.get<{ items: WatchlistItem[]; count: number }>(
+      '/api/v1/analysis/watchlist'
+    );
+    return response.data;
+  },
+
+  /** Add a stock to the watchlist */
+  add: async (code: string): Promise<{ status: string; code: string }> => {
+    const response = await apiClient.post<{ status: string; code: string }>(
+      `/api/v1/analysis/watchlist/add?code=${encodeURIComponent(code)}`
+    );
+    return response.data;
+  },
+
+  /** Remove a stock from the watchlist */
+  remove: async (code: string): Promise<{ status: string; code: string }> => {
+    const response = await apiClient.post<{ status: string; code: string }>(
+      `/api/v1/analysis/watchlist/remove?code=${encodeURIComponent(code)}`
+    );
+    return response.data;
+  },
+};

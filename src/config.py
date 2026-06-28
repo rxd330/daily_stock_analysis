@@ -1239,17 +1239,25 @@ class Config:
                 os.environ['https_proxy'] = https_proxy
 
         
-        # 解析自选股列表（逗号分隔，统一为大写 Issue #355）
-        stock_list_str = cls._resolve_env_value(
-            'STOCK_LIST',
-            default='',
-            prefer_env_file=True,
-        )
-        stock_list = [
-            (c or "").strip().upper()
-            for c in stock_list_str.split(',')
-            if (c or "").strip()
-        ]
+        
+        # 解析自选股列表 — 优先从数据库读取，首次自动从 .env 迁移
+        stock_list: List[str] = []
+        try:
+            from src.storage import get_db
+            db = get_db()
+            db_codes = db.get_watchlist_codes(active_only=True)
+            if db_codes:
+                stock_list = db_codes
+            else:
+                stock_list_str = cls._resolve_env_value('STOCK_LIST', default='', prefer_env_file=True)
+                env_codes = [(c or "").strip().upper() for c in stock_list_str.split(',') if (c or "").strip()]
+                if env_codes:
+                    db.import_watchlist_from_env(stock_list_str)
+                    stock_list = db.get_watchlist_codes(active_only=True)
+                    logger.info("Migrated %d stocks from STOCK_LIST env to watchlist table", len(stock_list))
+        except Exception:
+            stock_list_str = cls._resolve_env_value('STOCK_LIST', default='', prefer_env_file=True)
+            stock_list = [(c or "").strip().upper() for c in stock_list_str.split(',') if (c or "").strip()]
         
         # === LiteLLM multi-key parsing ===
         # GEMINI_API_KEYS (comma-separated) > GEMINI_API_KEY (single)
@@ -2687,33 +2695,51 @@ class Config:
 
     def refresh_stock_list(self) -> None:
         """
-        热读取 STOCK_LIST 环境变量并更新配置中的自选股列表
-        
-        支持两种配置方式：
-        1. .env 文件（本地开发、定时任务模式） - 修改后下次执行自动生效
-        2. 系统环境变量（GitHub Actions、Docker） - 启动时固定，运行中不变
+        从数据库读取自选股列表；初始启动时自动迁移 .env 中的 STOCK_LIST 到数据库。
+
+        优先级：数据库 watchlist > .env STOCK_LIST（回退）
+        首次启动：若数据库无数据但 .env 有配置，自动导入。
         """
-        # 优先从 .env 文件读取最新配置，这样即使在容器环境中修改了 .env 文件，
-        # 也能获取到最新的股票列表配置
-        env_file = os.getenv("ENV_FILE")
-        env_path = Path(env_file) if env_file else (Path(__file__).parent.parent / '.env')
-        stock_list_str = ''
-        if env_path.exists():
-            # 直接从 .env 文件读取最新的配置
-            env_values = dotenv_values(env_path)
-            stock_list_str = (env_values.get('STOCK_LIST') or '').strip()
+        codes: List[str] = []
 
-        # 如果 .env 文件不存在或未配置，才尝试从系统环境变量读取
-        if not stock_list_str:
-            stock_list_str = os.getenv('STOCK_LIST', '')
+        # 1. Try database first
+        try:
+            from src.storage import get_db
+            db = get_db()
+            codes = db.get_watchlist_codes(active_only=True)
+        except Exception as exc:
+            logger.debug("Watchlist DB read failed, falling back to .env: %s", exc)
 
-        stock_list = [
-            (c or "").strip().upper()
-            for c in stock_list_str.split(',')
-            if (c or "").strip()
-        ]
+        # 2. If DB is empty, try .env and auto-migrate
+        if not codes:
+            stock_list_str = ''
+            env_file = os.getenv("ENV_FILE")
+            env_path = Path(env_file) if env_file else (Path(__file__).parent.parent / '.env')
+            if env_path.exists():
+                env_values = dotenv_values(env_path)
+                stock_list_str = (env_values.get('STOCK_LIST') or '').strip()
+            if not stock_list_str:
+                stock_list_str = os.getenv('STOCK_LIST', '')
 
-        self.stock_list = stock_list
+            env_codes = [
+                (c or "").strip().upper()
+                for c in stock_list_str.split(',')
+                if (c or "").strip()
+            ]
+
+            if env_codes:
+                # Auto-migrate from .env to DB
+                try:
+                    from src.storage import get_db
+                    db = get_db()
+                    db.import_watchlist_from_env(stock_list_str)
+                    codes = db.get_watchlist_codes(active_only=True)
+                    logger.info("Migrated %d stocks from STOCK_LIST env to watchlist table", len(codes))
+                except Exception as exc:
+                    logger.warning("Watchlist migration failed, using .env fallback: %s", exc)
+                    codes = env_codes
+
+        self.stock_list = codes
     
     def validate_structured(self) -> List[ConfigIssue]:
         """Return structured validation issues with severity levels.

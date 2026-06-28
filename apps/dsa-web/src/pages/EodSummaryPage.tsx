@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Calendar, Play, RefreshCw, CheckCircle2, FileText, XCircle, Clock } from 'lucide-react';
-import { analysisApi, portfolioDigestApi } from '../api/analysis';
+import { analysisApi, portfolioDigestApi, watchlistApi } from '../api/analysis';
 import { systemConfigApi } from '../api/systemConfig';
 import { getParsedApiError, type ParsedApiError } from '../api/error';
 import { ApiErrorAlert, Badge, Button, EmptyState, InlineAlert } from '../components/common';
@@ -30,18 +30,23 @@ const EodSummaryPage: React.FC = () => {
   const [error, setError] = useState<ParsedApiError | null>(null);
   const pollTimer = useRef<number | null>(null);
 
-  // ---- Load stock list ----
+  // ---- Load stock list from watchlist ----
   const loadStockList = useCallback(async () => {
     setLoadingStocks(true);
     try {
-      const config = await systemConfigApi.getConfig(false);
-      const stockItem = config.items?.find((i) => i.key === 'STOCK_LIST');
-      if (stockItem?.value) {
-        const codes = stockItem.value.split(',').map((c) => c.trim()).filter(Boolean);
-        setStockCodes(codes);
-      }
+      const result = await watchlistApi.list();
+      const codes = result.items.map((i) => i.code);
+      setStockCodes(codes);
     } catch {
-      // Silent
+      // Fall back to system config
+      try {
+        const config = await systemConfigApi.getConfig(false);
+        const stockItem = config.items?.find((i) => i.key === 'STOCK_LIST');
+        if (stockItem?.value) {
+          const codes = stockItem.value.split(',').map((c) => c.trim()).filter(Boolean);
+          setStockCodes(codes);
+        }
+      } catch { /* silent */ }
     } finally {
       setLoadingStocks(false);
     }
