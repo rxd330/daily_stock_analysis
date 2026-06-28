@@ -270,6 +270,7 @@ def parse_arguments() -> argparse.Namespace:
   python main.py --single-notify    # 启用单股推送模式（每分析完一只立即推送）
   python main.py --schedule         # 启用定时任务模式
   python main.py --market-review    # 仅运行大盘复盘
+  python main.py --portfolio-digest # 生成持仓汇总（读取今日所有报告，LLM 总结）
         '''
     )
 
@@ -338,6 +339,12 @@ def parse_arguments() -> argparse.Namespace:
         '--no-market-review',
         action='store_true',
         help='跳过大盘复盘分析'
+    )
+
+    parser.add_argument(
+        '--portfolio-digest',
+        action='store_true',
+        help='生成持仓汇总：读取今日所有个股分析报告，调用 LLM 生成投资组合级别总结'
     )
 
     parser.add_argument(
@@ -1431,6 +1438,27 @@ def main() -> int:
                 override_region=effective_region,
                 trigger_source="cli",
             )
+            return 0
+
+        # 模式1.5: 生成持仓汇总（读取今日所有个股报告，LLM 生成组合总结）
+        if args.portfolio_digest:
+            logger.info("模式: 生成持仓汇总 (Portfolio Digest)")
+            from src.services.portfolio_digest import generate_portfolio_digest
+
+            result = generate_portfolio_digest()
+            if result["status"] == "ok":
+                digest = result["digest_text"]
+                logger.info("=" * 60)
+                logger.info("持仓汇总 (Portfolio Digest)")
+                logger.info("=" * 60)
+                logger.info(f"包含股票: {', '.join(result.get('stocks_included', []))}")
+                logger.info(f"模型: {result.get('model_used', 'unknown')}")
+                logger.info("-" * 60)
+                for line in (digest or "").split("\n"):
+                    logger.info(line)
+                logger.info("=" * 60)
+            else:
+                logger.warning(f"持仓汇总生成失败: {result.get('error', 'unknown')}")
             return 0
 
         # 模式2: 定时任务模式

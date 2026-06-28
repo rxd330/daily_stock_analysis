@@ -632,58 +632,85 @@ ALL_DATA_TOOLS = [
 # ============================================================
 
 def _handle_get_capital_flow(stock_code: str) -> dict:
-    """Get main-force capital flow data for a stock."""
+    """Get main-force capital flow data for a stock.
+
+    For A-share stocks: returns main capital net inflow and sector rankings.
+    For US stocks: falls through to institutional ownership + short interest
+    as US-equivalent "capital flow" signals.
+    """
     manager = _get_fetcher_manager()
+
+    # Try A-share capital flow first
     try:
         ctx = manager.get_capital_flow_context(stock_code)
+        status = ctx.get("status", "not_supported")
+        if status != "not_supported":
+            data = ctx.get("data", {})
+            stock_flow = data.get("stock_flow") or {}
+            sector_rankings = data.get("sector_rankings") or {}
+            errors = ctx.get("errors") or []
+            return {
+                "stock_code": stock_code,
+                "status": status,
+                "market": "cn",
+                "main_net_inflow": stock_flow.get("main_net_inflow"),
+                "inflow_5d": stock_flow.get("inflow_5d"),
+                "inflow_10d": stock_flow.get("inflow_10d"),
+                "sector_rankings": {
+                    "top_inflow_sectors": sector_rankings.get("top", [])[:3],
+                    "top_outflow_sectors": sector_rankings.get("bottom", [])[:3],
+                },
+                "errors": errors,
+            }
     except Exception as exc:
-        logger.warning("get_capital_flow failed for %s: %s", stock_code, exc)
-        return {
-            "stock_code": stock_code,
-            "status": "error",
-            "error": f"capital flow fetch failed: {exc}",
-        }
+        logger.warning("get_capital_flow A-share path failed for %s: %s", stock_code, exc)
 
-    status = ctx.get("status", "not_supported")
-    if status == "not_supported":
-        return {
-            "stock_code": stock_code,
-            "status": "not_supported",
-            "note": "Capital flow data is only available for A-share stocks (not ETFs/indices).",
-        }
-
-    data = ctx.get("data", {})
-    stock_flow = data.get("stock_flow") or {}
-    sector_rankings = data.get("sector_rankings") or {}
-    errors = ctx.get("errors") or []
+    # Fall through: try US market data
+    from data_provider.us_index_mapping import is_us_stock_code
+    if is_us_stock_code(str(stock_code).strip().upper()):
+        try:
+            from src.agent.tools.us_market_data import get_institutional_ownership, get_short_interest
+            inst = get_institutional_ownership(stock_code)
+            short = get_short_interest(stock_code)
+            return {
+                "stock_code": stock_code,
+                "status": "ok",
+                "market": "us",
+                "note": "US stocks do not have A-share-style main capital flow. "
+                        "Showing institutional ownership and short interest as US-equivalent flow signals.",
+                "institutional_ownership": inst,
+                "short_interest": short,
+            }
+        except Exception as exc:
+            logger.warning("get_capital_flow US fallback failed for %s: %s", stock_code, exc)
+            return {
+                "stock_code": stock_code,
+                "status": "error",
+                "error": f"capital flow fetch failed: {exc}",
+            }
 
     return {
         "stock_code": stock_code,
-        "status": status,
-        "main_net_inflow": stock_flow.get("main_net_inflow"),
-        "inflow_5d": stock_flow.get("inflow_5d"),
-        "inflow_10d": stock_flow.get("inflow_10d"),
-        "sector_rankings": {
-            "top_inflow_sectors": sector_rankings.get("top", [])[:3],
-            "top_outflow_sectors": sector_rankings.get("bottom", [])[:3],
-        },
-        "errors": errors,
+        "status": "not_supported",
+        "note": "Capital flow data is only available for A-share and US stocks.",
     }
 
 
 get_capital_flow_tool = ToolDefinition(
     name="get_capital_flow",
     description=(
-        "Get main-force (主力) capital flow data for an A-share stock. "
-        "Returns today's net inflow, 5-day and 10-day cumulative inflows, "
-        "and top sector-level capital flow rankings. "
-        "Only supported for A-share individual stocks (not ETFs, indices, HK, or US stocks)."
+        "Get capital flow data for a stock. "
+        "For A-shares: main-force (主力) net inflow, 5-day/10-day cumulative flows, "
+        "and sector-level rankings. "
+        "For US stocks: institutional ownership percentages and short interest data "
+        "(US-equivalent capital flow signals). "
+        "Not supported for HK stocks, ETFs, or indices."
     ),
     parameters=[
         ToolParameter(
             name="stock_code",
             type="string",
-            description="A-share stock code, e.g., '600519'",
+            description="Stock code, e.g., '600519' (A-share), 'AAPL' (US)",
         ),
     ],
     handler=_handle_get_capital_flow,
@@ -692,3 +719,42 @@ get_capital_flow_tool = ToolDefinition(
 
 
 ALL_DATA_TOOLS.append(get_capital_flow_tool)
+
+
+# ============================================================
+# get_us_stock_insights
+# ============================================================
+
+def _handle_get_us_stock_insights(stock_code: str) -> dict:
+    """Get comprehensive US stock enrichment insights.
+
+    Aggregates institutional ownership, short interest, analyst consensus,
+    insider activity, and sector classification in a single tool call.
+    Only applicable for US-listed stocks.
+    """
+    from src.agent.tools.us_market_data import get_us_stock_insights
+    return get_us_stock_insights(stock_code)
+
+
+get_us_stock_insights_tool = ToolDefinition(
+    name="get_us_stock_insights",
+    description=(
+        "Get comprehensive US stock enrichment data: institutional ownership "
+        "(top holders and percentages), short interest (float shorted and days-to-cover), "
+        "analyst consensus (rating, target price, upside potential), "
+        "recent insider transactions (buying/selling signal), and sector/industry classification. "
+        "Use this for US stocks to understand institutional positioning, market sentiment, "
+        "and Wall Street consensus. Only applicable for US-listed stocks (e.g. AAPL, NVDA, TSLA)."
+    ),
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="US stock ticker symbol, e.g., 'NVDA', 'AAPL', 'TSLA'",
+        ),
+    ],
+    handler=_handle_get_us_stock_insights,
+    category="data",
+)
+
+ALL_DATA_TOOLS.append(get_us_stock_insights_tool)

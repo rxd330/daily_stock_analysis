@@ -1357,3 +1357,27 @@ def _build_analysis_report(
         strategy=strategy,
         details=details
     )
+
+
+# ============================================================
+# Portfolio Digest endpoint
+# ============================================================
+
+@router.post("/portfolio-digest")
+async def portfolio_digest(
+    codes: Optional[str] = Query(None, description="Comma-separated stock codes (optional, defaults to all)"),
+    lang: str = Query("zh", description="Language: zh or en"),
+):
+    """Generate a portfolio-level digest from today's individual stock analyses.
+
+    Reads all analysis_history records from today, feeds them to the LLM,
+    and returns a consolidated portfolio summary.
+    """
+    from src.services.portfolio_digest import generate_portfolio_digest
+
+    code_list = None
+    if codes:
+        code_list = [c.strip().upper() for c in codes.split(",") if c.strip()]
+
+    result = generate_portfolio_digest(codes=code_list, lang=lang)
+    return JSONResponse(content=result)
