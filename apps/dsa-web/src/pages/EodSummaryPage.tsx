@@ -86,9 +86,16 @@ const EodSummaryPage: React.FC = () => {
 
   // ---- Generate digest with SSE heartbeat ----
   const generateDigestOnly = useCallback(async (targetDate?: string) => {
+    const startTime = Date.now();
     setPhase('digesting');
     setDigestStep(1);
     setError(null);
+
+    // Force React to render step 1 before continuing
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Don't show progress for no_data (instant response)
+    let skipProgress = false;
 
     try {
       const params = new URLSearchParams();
@@ -105,6 +112,8 @@ const EodSummaryPage: React.FC = () => {
 
       const decoder = new TextDecoder();
       let buffer = '';
+      let finalResult: PortfolioDigestResponse | null = null;
+      let streamError: string | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -123,20 +132,46 @@ const EodSummaryPage: React.FC = () => {
             if (eventType === 'step') {
               setDigestStep(data.step as 1 | 2 | 3 | 4);
             } else if (eventType === 'result') {
+              finalResult = {
+                status: data.status,
+                digestText: data.digest_text ?? null,
+                targetDate: data.target_date ?? '',
+                isToday: data.is_today ?? false,
+                stockCount: data.stock_count ?? 0,
+                stocksIncluded: data.stocks_included,
+                stocksFreshness: data.stocks_freshness,
+                anyStale: data.any_stale,
+                modelUsed: data.model_used,
+                error: data.error,
+              };
               setDigestStep(4);
-              setDigest(data);
-              await new Promise((r) => setTimeout(r, 400));
-              setPhase('done');
-              void loadDates();
-              return;
+              if (data.status === 'no_data') {
+                skipProgress = true;
+              }
             } else if (eventType === 'error') {
-              setError({ message: data.error, status: 500 } as ParsedApiError);
-              setPhase('idle');
-              return;
+              streamError = data.error;
             }
             eventType = '';
           }
         }
+      }
+
+      // For no_data (instant): skip progress, go straight to result
+      // For ok (LLM call): ensure progress visible at least 1.5s
+      if (!skipProgress) {
+        const elapsed = Date.now() - startTime;
+        if (elapsed < 1500) {
+          await new Promise((r) => setTimeout(r, 1500 - elapsed));
+        }
+      }
+
+      if (streamError) {
+        setError({ message: streamError, status: 500 } as ParsedApiError);
+        setPhase('idle');
+      } else if (finalResult) {
+        setDigest(finalResult);
+        setPhase('done');
+        void loadDates();
       }
     } catch (err) {
       setError(getParsedApiError(err));
