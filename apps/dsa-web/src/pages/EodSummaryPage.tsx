@@ -22,6 +22,7 @@ const EodSummaryPage: React.FC = () => {
   const [hasReportsToday, setHasReportsToday] = useState<boolean | null>(null);
 
   const [phase, setPhase] = useState<'idle' | 'analyzing' | 'digesting' | 'done'>('idle');
+  const [digestStep, setDigestStep] = useState<1 | 2 | 3 | 4>(1);
   const [tasks, setTasks] = useState<TaskState[]>([]);
   const [digest, setDigest] = useState<PortfolioDigestResponse | null>(null);
   const [error, setError] = useState<ParsedApiError | null>(null);
@@ -86,10 +87,21 @@ const EodSummaryPage: React.FC = () => {
   // ---- Generate digest only (fast — reads existing reports) ----
   const generateDigestOnly = useCallback(async (date?: string) => {
     setPhase('digesting');
+    setDigestStep(1);
     setError(null);
     setDigest(null);
+
+    // Step 1→2: simulate reading reports (instant in backend, slight delay for UX)
+    await new Promise((r) => setTimeout(r, 600));
+    setDigestStep(2);
+
+    // Step 2→3: simulate freshness check (instant in backend)
+    await new Promise((r) => setTimeout(r, 400));
+    setDigestStep(3);
+
     try {
       const result = await portfolioDigestApi.generate({ date: date || selectedDate, lang: 'zh' });
+      setDigestStep(4);
       setDigest(result);
       setPhase('done');
       void loadDates();
@@ -219,9 +231,31 @@ const EodSummaryPage: React.FC = () => {
             </div>
           )}
           {phase === 'digesting' && (
-            <div className="flex items-center gap-2">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-              <span className="text-sm text-secondary-text">生成总结中...</span>
+            <div className="flex flex-col gap-2 mt-2 w-full max-w-md">
+              {[
+                { step: 1, label: '读取分析报告', desc: '从数据库加载今日个股分析结果' },
+                { step: 2, label: '检查数据新鲜度', desc: '标记每只股票的报告日期' },
+                { step: 3, label: 'AI 生成总结', desc: '调用大模型生成投资组合概述' },
+                { step: 4, label: '完成', desc: '总结已生成' },
+              ].map((s) => {
+                const isActive = s.step === digestStep;
+                const isDone = s.step < digestStep;
+                const isPending = s.step > digestStep;
+                return (
+                  <div key={s.step} className={`flex items-start gap-3 transition-opacity ${isPending ? 'opacity-30' : 'opacity-100'}`}>
+                    <div className={`flex-shrink-0 w-5 h-5 mt-0.5 rounded-full flex items-center justify-center text-xs font-bold
+                      ${isDone ? 'bg-green-500 text-white' : isActive ? 'bg-primary text-white animate-pulse' : 'bg-border text-secondary-text'}`}>
+                      {isDone ? <CheckCircle2 className="h-3.5 w-3.5" /> : s.step}
+                    </div>
+                    <div>
+                      <div className={`text-sm font-medium ${isDone ? 'text-green-600' : isActive ? 'text-foreground' : 'text-secondary-text'}`}>
+                        {s.label}
+                      </div>
+                      {isActive && <div className="text-xs text-secondary-text mt-0.5">{s.desc}</div>}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
