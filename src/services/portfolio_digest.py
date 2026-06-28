@@ -340,6 +340,7 @@ def generate_portfolio_digest(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1024,
             temperature=0.5,
+            timeout=300,
         )
         digest_text = response.choices[0].message.content
         model_used = getattr(response, "model", resolved_model)
