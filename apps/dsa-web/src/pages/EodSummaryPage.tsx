@@ -89,9 +89,8 @@ const EodSummaryPage: React.FC = () => {
     setPhase('digesting');
     setDigestStep(1);
     setError(null);
-    setDigest(null);
 
-    // Step 1→2: simulate reading reports (instant in backend, slight delay for UX)
+    // Step 1→2: reading reports from DB
     await new Promise((r) => setTimeout(r, 600));
     setDigestStep(2);
 
@@ -103,10 +102,14 @@ const EodSummaryPage: React.FC = () => {
       const result = await portfolioDigestApi.generate({ date: date || selectedDate, lang: 'zh' });
       setDigestStep(4);
       setDigest(result);
+      // Brief pause so user sees step 4 complete before result replaces progress
+      await new Promise((r) => setTimeout(r, 600));
       setPhase('done');
       void loadDates();
     } catch (err) {
+      setDigestStep(4);
       setError(getParsedApiError(err));
+      await new Promise((r) => setTimeout(r, 800));
       setPhase('idle');
     }
   }, [selectedDate, loadDates]);
