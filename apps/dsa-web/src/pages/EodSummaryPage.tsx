@@ -84,32 +84,62 @@ const EodSummaryPage: React.FC = () => {
     return updated;
   }, []);
 
-  // ---- Generate digest only (fast — reads existing reports) ----
-  const generateDigestOnly = useCallback(async (date?: string) => {
+  // ---- Generate digest with SSE heartbeat ----
+  const generateDigestOnly = useCallback(async (targetDate?: string) => {
     setPhase('digesting');
     setDigestStep(1);
     setError(null);
 
-    // Step 1→2: reading reports from DB
-    await new Promise((r) => setTimeout(r, 600));
-    setDigestStep(2);
-
-    // Step 2→3: simulate freshness check (instant in backend)
-    await new Promise((r) => setTimeout(r, 400));
-    setDigestStep(3);
-
     try {
-      const result = await portfolioDigestApi.generate({ date: date || selectedDate, lang: 'zh' });
-      setDigestStep(4);
-      setDigest(result);
-      // Brief pause so user sees step 4 complete before result replaces progress
-      await new Promise((r) => setTimeout(r, 600));
-      setPhase('done');
-      void loadDates();
+      const params = new URLSearchParams();
+      params.set('lang', 'zh');
+      if (targetDate || selectedDate) params.set('date', targetDate || selectedDate);
+
+      const url = `/api/v1/analysis/portfolio-digest/stream?${params.toString()}`;
+      const response = await fetch(url, { method: 'POST' });
+
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        let eventType = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            const data = JSON.parse(line.slice(6));
+            if (eventType === 'step') {
+              setDigestStep(data.step as 1 | 2 | 3 | 4);
+            } else if (eventType === 'result') {
+              setDigestStep(4);
+              setDigest(data);
+              await new Promise((r) => setTimeout(r, 400));
+              setPhase('done');
+              void loadDates();
+              return;
+            } else if (eventType === 'error') {
+              setError({ message: data.error, status: 500 } as ParsedApiError);
+              setPhase('idle');
+              return;
+            }
+            eventType = '';
+          }
+        }
+      }
     } catch (err) {
-      setDigestStep(4);
       setError(getParsedApiError(err));
-      await new Promise((r) => setTimeout(r, 800));
       setPhase('idle');
     }
   }, [selectedDate, loadDates]);

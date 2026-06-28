@@ -1394,6 +1394,117 @@ async def portfolio_digest(
     return JSONResponse(content=result)
 
 
+@router.post("/portfolio-digest/stream")
+async def portfolio_digest_stream(
+    codes: Optional[str] = Query(None, description="Comma-separated stock codes (optional)"),
+    lang: str = Query("zh", description="Language: zh or en"),
+    date: Optional[str] = Query(None, description="Target date YYYY-MM-DD (default: today)"),
+):
+    """Generate a portfolio-level digest with SSE progress streaming.
+
+    Events:
+      - event: step, data: {step: 1|2|3|4, label: "..."}
+      - event: result, data: {status, digest_text, ...}
+      - event: error, data: {error: "..."}
+    """
+    import asyncio
+    from datetime import date as date_type
+    import json as _json
+    from src.services.portfolio_digest import (
+        fetch_reports_for_date,
+        compute_stock_freshness,
+        format_analyses_for_prompt,
+        _resolve_model,
+        _parse_date,
+    )
+
+    code_list = None
+    if codes:
+        code_list = [c.strip().upper() for c in codes.split(",") if c.strip()]
+
+    parsed_date = _parse_date(date)
+    effective_date = parsed_date or date_type.today()
+    is_today = effective_date == date_type.today()
+
+    async def event_stream():
+        # Step 1: Read reports
+        yield f"event: step\ndata: {_json.dumps({'step': 1, 'label': '读取分析报告', 'desc': '从数据库加载个股分析结果'})}\n\n"
+        await asyncio.sleep(0)
+
+        try:
+            reports, _ = fetch_reports_for_date(target_date=parsed_date, codes=code_list)
+        except Exception as exc:
+            yield f"event: error\ndata: {_json.dumps({'error': f'读取报告失败: {exc}'})}\n\n"
+            return
+
+        if not reports:
+            yield f"event: result\ndata: {_json.dumps({'status': 'no_data', 'target_date': effective_date.isoformat(), 'is_today': is_today, 'stock_count': 0})}\n\n"
+            return
+
+        # Step 2: Freshness
+        yield f"event: step\ndata: {_json.dumps({'step': 2, 'label': '检查数据新鲜度', 'desc': f'标记 {len(reports)} 只股票的报告日期'})}\n\n"
+        await asyncio.sleep(0)
+
+        freshness = compute_stock_freshness(reports, effective_date)
+        any_stale = any(not f["fresh"] for f in freshness)
+        included_codes = [r.get("code", "?").upper() for r in reports]
+
+        # Step 3: LLM
+        resolved_model = _resolve_model()
+        if not resolved_model:
+            yield f"event: result\ndata: {_json.dumps({'status': 'error', 'error': 'No LLM model configured', 'target_date': effective_date.isoformat(), 'is_today': is_today})}\n\n"
+            return
+
+        yield f"event: step\ndata: {_json.dumps({'step': 3, 'label': 'AI 生成总结', 'desc': f'调用 {resolved_model} 生成投资组合概述'})}\n\n"
+        await asyncio.sleep(0)
+
+        try:
+            import litellm
+            staleness_note = ""
+            if any_stale:
+                stale_codes = [f["code"] for f in freshness if not f["fresh"]]
+                staleness_note = f"⚠️ 注意：以下股票的分析数据不是最新的：{', '.join(stale_codes)}。在评估这些股票时请降低置信度。\n\n"
+
+            formatted = format_analyses_for_prompt(reports, freshness, lang=lang)
+            prompt = f"""你是一名投资组合策略师，正在审阅{effective_date}的股票分析结果。
+
+以下是投资组合中 {len(reports)} 只股票的个股分析结果。
+每只股票包含：代码、名称、情绪评分（0-100）、操作建议、趋势预测、一句话总结。
+{staleness_note}
+{formatted}
+
+仅基于以上信息，撰写一份简明的投资组合级别总结，涵盖：
+1. 整体组合健康状况 — 综合情绪，多空比例
+2. 最强持仓 — 哪些股票表现最好及原因（每只1-2句话）
+3. 需要关注的持仓 — 哪些股票出现警示信号
+4. 交叉主题 — 板块、宏观或组合间共同模式
+5. 建议操作 — 2-3条可执行的投资组合管理建议
+6. 风险状况 — 整体风险水平及关键风险因素
+
+请具体、数据驱动、简明。用中文输出。总回复控制在500字以内。"""
+
+            response = litellm.completion(
+                model=resolved_model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1024,
+                temperature=0.5,
+            )
+            digest_text = response.choices[0].message.content
+            model_used = getattr(response, "model", resolved_model)
+
+        except Exception as exc:
+            yield f"event: error\ndata: {_json.dumps({'error': f'LLM 调用失败: {exc}'})}\n\n"
+            return
+
+        # Step 4: Done
+        yield f"event: step\ndata: {_json.dumps({'step': 4, 'label': '完成', 'desc': '总结已生成'})}\n\n"
+        await asyncio.sleep(0)
+
+        yield f"event: result\ndata: {_json.dumps({'status': 'ok', 'digest_text': digest_text, 'target_date': effective_date.isoformat(), 'is_today': is_today, 'stock_count': len(reports), 'stocks_included': included_codes, 'stocks_freshness': freshness, 'any_stale': any_stale, 'model_used': model_used})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 @router.get("/available-digest-dates")
 async def available_digest_dates(
     days: int = Query(30, description="Lookback window in days"),
